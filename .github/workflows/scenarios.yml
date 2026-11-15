@@ -1,0 +1,20 @@
+name: Prototype scenario checks
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  scenario-tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Run release-policy scenarios
+        run: python3 -m unittest discover -s scripts -v
+      - name: Check fixture build
+        run: |
+          go test ./...
+          go vet ./...

@@ -1,0 +1,64 @@
+name: Prototype bootstrap
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Existing prototype branch to use for the release PR
+        required: true
+        default: prototype/wayfinder-357
+        type: string
+      version:
+        description: Stable SemVer version to place in VERSION
+        required: true
+        default: 0.1.0
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  create-release-pr:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+      - name: Create or advance the automation release branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_REF: ${{ inputs.source_ref }}
+          VERSION: ${{ inputs.version }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          if ! [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "version must be stable SemVer" >&2
+            exit 1
+          fi
+
+          if git ls-remote --exit-code origin refs/heads/release/bot >/dev/null 2>&1; then
+            git fetch origin release/bot
+            git checkout -B release/bot FETCH_HEAD
+          else
+            git fetch origin "$SOURCE_REF"
+            git checkout -b release/bot FETCH_HEAD
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          printf '%s\n' "$VERSION" > VERSION
+          git add VERSION
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(release): v$VERSION"
+          fi
+          git push origin release/bot
+
+          number=$(gh pr list --repo "$REPOSITORY" --head release/bot --base main --json number --jq '.[0].number // empty')
+          if [ -z "$number" ]; then
+            gh pr create --repo "$REPOSITORY" --base main --head release/bot \
+              --title "Release v$VERSION" \
+              --body "Automation-authored release PR for the isolated issue 357 proof."
+          else
+            gh pr edit "$number" --repo "$REPOSITORY" --title "Release v$VERSION"
+          fi
