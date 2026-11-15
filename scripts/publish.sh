@@ -28,7 +28,9 @@ if [ "$tag_status" -eq 0 ]; then
 	[ "$(git cat-file -t "refs/tags/$TAG")" = "tag" ] || die "existing version tag is not annotated"
 	[ "$(git rev-parse "refs/tags/$TAG^{}")" = "$MERGE_SHA" ] || die "conflicting version tag target"
 elif [ "$tag_status" -eq 2 ]; then
-	git tag -a "$TAG" "$MERGE_SHA" -m "Release $TAG"
+	git -c user.name='github-actions[bot]' \
+		-c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+		tag -a "$TAG" "$MERGE_SHA" -m "Release $TAG"
 	git push origin "refs/tags/$TAG"
 else
 	die "could not inspect remote version tag"
