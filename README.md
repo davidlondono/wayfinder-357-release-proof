@@ -1,7 +1,7 @@
 # PROTOTYPE: merge-authorized release publication
 
-Throwaway proof for Wayfinder issue 357. This private repository and its GHCR
-package are isolated from the template repository.
+Throwaway proof for Wayfinder issue 357. This public fixture uses synthetic code
+and stays isolated from the template repository.
 
 The prototype checks release-PR authority, exact-SHA gates, keyless signing,
 immutable publication, GHCR digest promotion, retries, and alias monotonicity.
