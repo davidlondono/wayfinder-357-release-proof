@@ -40,6 +40,9 @@ jobs:
 
           git check-ref-format "refs/heads/$SOURCE_REF"
           source_advanced=false
+          bot_updated=false
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           if git ls-remote --exit-code origin refs/heads/release/bot >/dev/null 2>&1; then
             git fetch origin release/bot
             git checkout -B release/bot FETCH_HEAD
@@ -51,8 +54,9 @@ jobs:
                 git merge --ff-only "$source_sha"
                 source_advanced=true
               elif ! git merge-base --is-ancestor "$source_sha" "$current_sha"; then
-                echo "source ref is not a fast-forward of release/bot" >&2
-                exit 1
+                git merge --no-ff --no-edit "$source_sha"
+                source_advanced=true
+                bot_updated=true
               fi
             fi
           else
@@ -61,13 +65,11 @@ jobs:
             source_advanced=true
           fi
 
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           printf '%s\n' "$VERSION" > VERSION
           git add VERSION
           if ! git diff --cached --quiet; then
             git commit -m "chore(release): v$VERSION"
-          elif [ "$source_advanced" = true ]; then
+          elif [ "$source_advanced" = true ] && [ "$bot_updated" = false ]; then
             git commit --allow-empty -m "chore(release): refresh v$VERSION"
           fi
           git push origin release/bot
