@@ -60,7 +60,7 @@ has_asset() {
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
-for artifact in dist/server_* dist/release.spdx.json dist/SHA256SUMS; do
+for artifact in dist/server_* dist/appctl_* dist/release.spdx.json dist/SHA256SUMS; do
 	bundle="$artifact.sigstore.json"
 	if has_asset "$(basename "$bundle")"; then
 		gh release download "$TAG" --repo "$REPOSITORY" --pattern "$(basename "$bundle")" --dir "$tmp" >/dev/null
@@ -74,7 +74,7 @@ done
 
 (cd dist && sha256sum --check SHA256SUMS)
 
-for file in dist/server_* dist/release.spdx.json dist/SHA256SUMS dist/*.sigstore.json; do
+for file in dist/server_* dist/appctl_* dist/release.spdx.json dist/SHA256SUMS dist/*.sigstore.json; do
 	name=$(basename "$file")
 	if has_asset "$name"; then
 		gh release download "$TAG" --repo "$REPOSITORY" --pattern "$name" --dir "$tmp" >/dev/null
@@ -90,7 +90,7 @@ for file in dist/server_* dist/release.spdx.json dist/SHA256SUMS dist/*.sigstore
 	fi
 done
 
-for artifact in dist/server_* dist/release.spdx.json dist/SHA256SUMS; do
+for artifact in dist/server_* dist/appctl_* dist/release.spdx.json dist/SHA256SUMS; do
 	name=$(basename "$artifact")
 	gh release download "$TAG" --repo "$REPOSITORY" --pattern "$name" --dir "$tmp" >/dev/null
 	cmp --silent "$artifact" "$tmp/$name" || die "published release asset differs: $name"
