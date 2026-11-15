@@ -47,12 +47,13 @@ jobs:
             source_sha=$(git rev-parse FETCH_HEAD)
             current_sha=$(git rev-parse HEAD)
             if [ "$source_sha" != "$current_sha" ]; then
-              git merge-base --is-ancestor "$current_sha" "$source_sha" || {
+              if git merge-base --is-ancestor "$current_sha" "$source_sha"; then
+                git merge --ff-only "$source_sha"
+                source_advanced=true
+              elif ! git merge-base --is-ancestor "$source_sha" "$current_sha"; then
                 echo "source ref is not a fast-forward of release/bot" >&2
                 exit 1
-              }
-              git merge --ff-only "$source_sha"
-              source_advanced=true
+              fi
             fi
           else
             git fetch origin "refs/heads/$SOURCE_REF"
