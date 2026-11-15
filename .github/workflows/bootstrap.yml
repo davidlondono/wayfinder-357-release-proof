@@ -32,25 +32,45 @@ jobs:
           VERSION: ${{ inputs.version }}
           REPOSITORY: ${{ github.repository }}
         run: |
+          set -euo pipefail
           if ! [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
             echo "version must be stable SemVer" >&2
             exit 1
           fi
 
+          git check-ref-format "refs/heads/$SOURCE_REF"
+          source_advanced=false
+          bot_updated=false
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           if git ls-remote --exit-code origin refs/heads/release/bot >/dev/null 2>&1; then
             git fetch origin release/bot
             git checkout -B release/bot FETCH_HEAD
+            git fetch origin "refs/heads/$SOURCE_REF"
+            source_sha=$(git rev-parse FETCH_HEAD)
+            current_sha=$(git rev-parse HEAD)
+            if [ "$source_sha" != "$current_sha" ]; then
+              if git merge-base --is-ancestor "$current_sha" "$source_sha"; then
+                git merge --ff-only "$source_sha"
+                source_advanced=true
+              elif ! git merge-base --is-ancestor "$source_sha" "$current_sha"; then
+                git merge --no-ff --no-edit "$source_sha"
+                source_advanced=true
+                bot_updated=true
+              fi
+            fi
           else
-            git fetch origin "$SOURCE_REF"
+            git fetch origin "refs/heads/$SOURCE_REF"
             git checkout -b release/bot FETCH_HEAD
+            source_advanced=true
           fi
 
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           printf '%s\n' "$VERSION" > VERSION
           git add VERSION
           if ! git diff --cached --quiet; then
             git commit -m "chore(release): v$VERSION"
+          elif [ "$source_advanced" = true ] && [ "$bot_updated" = false ]; then
+            git commit --allow-empty -m "chore(release): refresh v$VERSION"
           fi
           git push origin release/bot
 

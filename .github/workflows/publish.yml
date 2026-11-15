@@ -1,0 +1,244 @@
+name: Merge-authorized release publication
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: release-publication-${{ github.repository }}
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  authorize:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      authorized: ${{ steps.verify.outputs.authorized }}
+      release_pr: ${{ steps.verify.outputs.release_pr }}
+      version: ${{ steps.verify.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+      - name: Verify merge authority
+        id: verify
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/verify_event.py
+
+  gates:
+    needs: authorize
+    if: needs.authorize.outputs.authorized == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run release policy scenarios
+        run: python3 -m unittest discover -s scripts -v
+      - name: Run Go gates
+        run: |
+          go test ./...
+          go vet ./...
+
+  candidate:
+    needs: [authorize, gates]
+    if: needs.authorize.outputs.authorized == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    outputs:
+      digest: ${{ steps.select.outputs.digest }}
+      version: ${{ needs.authorize.outputs.version }}
+    env:
+      IMAGE: ghcr.io/${{ github.repository }}
+      CANDIDATE: sha-${{ github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+      - name: Install pinned crane
+        run: |
+          go install github.com/google/go-containerregistry/cmd/crane@v0.22.1
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Find an existing authorized candidate
+        id: lookup
+        run: |
+          if crane ls "$IMAGE" | grep -Fxq "$CANDIDATE"; then
+            echo "digest=$(crane digest "$IMAGE:$CANDIDATE")" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Build authorized multi-platform candidate
+        id: build
+        if: steps.lookup.outputs.digest == ''
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ env.IMAGE }}:${{ env.CANDIDATE }}
+          build-args: |
+            VERSION=v${{ needs.authorize.outputs.version }}
+            VCS_REF=${{ github.sha }}
+          provenance: mode=max
+          sbom: true
+      - name: Select candidate index digest
+        id: select
+        env:
+          FOUND_DIGEST: ${{ steps.lookup.outputs.digest }}
+          BUILT_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          digest="$FOUND_DIGEST"
+          if [ -z "$digest" ]; then digest="$BUILT_DIGEST"; fi
+          [ -n "$digest" ] || exit 1
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      - name: Verify index descriptors
+        env:
+          DIGEST: ${{ steps.select.outputs.digest }}
+        run: |
+          crane manifest "$IMAGE@$DIGEST" > /tmp/index.json
+          python3 scripts/verify_index.py /tmp/index.json
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532
+      - name: Sign candidate digest with the main workflow identity
+        env:
+          DIGEST: ${{ steps.select.outputs.digest }}
+        run: |
+          identity="https://github.com/$GITHUB_REPOSITORY/.github/workflows/publish.yml@refs/heads/main"
+          signature_ref=$(cosign triangulate "$IMAGE@$DIGEST")
+          signature_tag=${signature_ref##*:}
+          if crane ls "$IMAGE" | grep -Fxq "$signature_tag"; then
+            cosign verify --certificate-identity "$identity" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com "$IMAGE@$DIGEST" >/dev/null
+          else
+            cosign sign --yes "$IMAGE@$DIGEST"
+          fi
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.select.outputs.digest }}
+          push-to-registry: true
+
+  smoke:
+    needs: [authorize, candidate]
+    if: needs.authorize.outputs.authorized == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: amd64
+            runner: ubuntu-24.04
+          - architecture: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      packages: read
+    env:
+      IMAGE: ghcr.io/${{ github.repository }}
+      DIGEST: ${{ needs.candidate.outputs.digest }}
+      VERSION: ${{ needs.authorize.outputs.version }}
+    steps:
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Smoke-test exact index digest on native runner
+        env:
+          ARCHITECTURE: ${{ matrix.architecture }}
+        run: |
+          output=$(docker run --rm "$IMAGE@$DIGEST")
+          test "$output" = "v$VERSION linux/$ARCHITECTURE"
+
+  publish:
+    needs: [authorize, gates, candidate, smoke]
+    if: needs.authorize.outputs.authorized == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GITHUB_TOKEN: ${{ github.token }}
+      REPOSITORY: ${{ github.repository }}
+      MERGE_SHA: ${{ github.sha }}
+      IMAGE: ghcr.io/${{ github.repository }}
+      IMAGE_DIGEST: ${{ needs.candidate.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Build release binaries from exact merge SHA
+        run: |
+          version="v$(cat VERSION)"
+          mkdir -p dist
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+            os=${target%/*}
+            arch=${target#*/}
+            for command in server appctl; do
+              GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 go build -trimpath -buildvcs=false \
+                -ldflags="-s -w -X main.version=$version" \
+                -o "dist/${command}_${os}_${arch}" "./cmd/$command"
+            done
+          done
+      - uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c
+        with:
+          path: dist
+          format: spdx-json
+          output-file: dist/release.spdx.json
+          upload-artifact: false
+      - name: Create checksums
+        working-directory: dist
+        run: sha256sum server_* appctl_* release.spdx.json > SHA256SUMS
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8
+        with:
+          subject-path: |
+            dist/server_*
+            dist/appctl_*
+            dist/release.spdx.json
+            dist/SHA256SUMS
+      - name: Install pinned crane
+        run: |
+          go install github.com/google/go-containerregistry/cmd/crane@v0.22.1
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Promote and verify release
+        run: |
+          export VERSION="$(cat VERSION)"
+          bash scripts/publish.sh
